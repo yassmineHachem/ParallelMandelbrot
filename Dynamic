@@ -1,0 +1,74 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <mpi.h>
+
+#define IMAGE_WIDTH 1200
+#define IMAGE_HEIGHT 800
+#define MAX_ITERATIONS 1000
+
+int computeMandelbrot(double real, double imag) {
+    int iteration;
+    double zReal = 0.0, zImag = 0.0;
+
+    for (iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
+        double zRealSq = zReal * zReal, zImagSq = zImag * zImag;
+        if (zRealSq + zImagSq > 4.0) break;
+        double temp = zRealSq - zImagSq + real;
+        zImag = 2.0 * zReal * zImag + imag;
+        zReal = temp;
+    }
+
+    return iteration;
+}
+
+int main(int argc, char** argv) {
+    MPI_Init(&argc, &argv);
+    int rank, size;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    double startTime = MPI_Wtime();
+    unsigned char* localImage = malloc(IMAGE_WIDTH * IMAGE_HEIGHT / size * sizeof(unsigned char));
+    if (localImage == NULL) {
+        fprintf(stderr, "Error: Memory allocation failed.\n");
+        MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+    }
+
+    for (int y = rank; y < IMAGE_HEIGHT; y += size) {
+        for (int x = 0; x < IMAGE_WIDTH; x++) {
+            double real = (x - IMAGE_WIDTH / 2.0) * 4.0 / IMAGE_WIDTH;
+            double imag = (y - IMAGE_HEIGHT / 2.0) * 4.0 / IMAGE_HEIGHT;
+            int index = (y / size) * IMAGE_WIDTH + x;
+            localImage[index] = computeMandelbrot(real, imag) % 256;
+        }
+    }
+
+    unsigned char* globalImage = NULL;
+    if (rank == 0) globalImage = malloc(IMAGE_WIDTH * IMAGE_HEIGHT * sizeof(unsigned char));
+
+    MPI_Gather(localImage, IMAGE_WIDTH * IMAGE_HEIGHT / size, MPI_UNSIGNED_CHAR, globalImage, IMAGE_WIDTH * IMAGE_HEIGHT / size, MPI_UNSIGNED_CHAR, 0, MPI_COMM_WORLD);
+
+    if (rank == 0) {
+        FILE* fp = fopen("mandelbrot.ppm", "wb");
+        fprintf(fp, "P6\n%d %d\n255\n", IMAGE_WIDTH, IMAGE_HEIGHT);
+        for (int i = 0; i < IMAGE_HEIGHT; i++) {
+            for (int j = 0; j < IMAGE_WIDTH; j++) {
+                fputc(globalImage[i * IMAGE_WIDTH + j], fp);
+                fputc(globalImage[i * IMAGE_WIDTH + j], fp);
+                fputc(globalImage[i * IMAGE_WIDTH + j], fp);
+            }
+        }
+        fclose(fp);
+        free(globalImage);
+        printf("Mandelbrot set image saved to mandelbrot.ppm\n");
+    }
+
+    free(localImage);
+    double endTime = MPI_Wtime();
+    if (rank == 0) {
+        printf("Total execution time: %f seconds\n", endTime - startTime);
+    }
+
+    MPI_Finalize();
+    return 0;
+}
