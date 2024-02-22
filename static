@@ -1,64 +1,93 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <omp.h>  
-#include <time.h>
+#include <mpi.h>
 
-#define WIDTH 640
-#define HEIGHT 480
-#define MAX_ITER 255
+#define IMG_WIDTH 1200  
+#define IMG_HEIGHT 800  
+#define MAX_ITERATIONS 1000
 
-struct complex {
-    double real;
-    double imag;
-};
+int computeMandelbrot(double real, double imag) {
+    int iter;
+    double zReal = 0.0, zImag = 0.0;
 
-// Function to calculate the color of a particular pixel
-int cal_pixel(struct complex c) {
-    double z_real = 0;
-    double z_imag = 0;
-    double z_real2, z_imag2, lengthsq;
-    int iter = 0;
-    do {
-        z_real2 = z_real * z_real;
-        z_imag2 = z_imag * z_imag;
-        lengthsq = z_real2 + z_imag2;
-        if (lengthsq >= 4.0) break; 
-        z_imag = 2 * z_real * z_imag + c.imag;
-        z_real = z_real2 - z_imag2 + c.real;
-        iter++;
-    } while (iter < MAX_ITER);
+    for (iter = 0; iter < MAX_ITERATIONS; iter++) {
+        double zReal2 = zReal * zReal, zImag2 = zImag * zImag;
+        if (zReal2 + zImag2 > 4.0) break;
+        zImag = 2.0 * zReal * zImag + imag;
+        zReal = zReal2 - zImag2 + real;
+    }
+
     return iter;
 }
 
-// Function to save the image in PGM format
-void save_pgm(const char *filename, int image[HEIGHT][WIDTH]) {
-    FILE *pgmimg;
-    pgmimg = fopen(filename, "wb"); 
-    fprintf(pgmimg, "P2\n%d %d\n255\n", WIDTH, HEIGHT); 
-    for (int i = 0; i < HEIGHT; i++) {
-        for (int j = 0; j < WIDTH; j++) {
-            fprintf(pgmimg, "%d ", image[i][j]);
-        }
-        fprintf(pgmimg, "\n");
-    }
-    fclose(pgmimg); 
-}
+int main(int argc, char **argv) {
+    MPI_Init(&argc, &argv);
 
-int main() {
-    int image[HEIGHT][WIDTH]; // Image array
+    int processID, numProcesses;
+    MPI_Comm_rank(MPI_COMM_WORLD, &processID);
+    MPI_Comm_size(MPI_COMM_WORLD, &numProcesses);
 
-    // Parallel region starts here
-    #pragma omp parallel for schedule(static)
-    for (int i = 0; i < HEIGHT; i++) {
-        struct complex c;
-        for (int j = 0; j < WIDTH; j++) {
-            c.real = (j - WIDTH / 2.0) * 4.0 / WIDTH;
-            c.imag = (i - HEIGHT / 2.0) * 4.0 / HEIGHT;
-            image[i][j] = cal_pixel(c); 
+    double startTime = MPI_Wtime();
+
+    int segmentHeight = IMG_HEIGHT / numProcesses;
+    unsigned char *segmentBuffer = (unsigned char *)malloc(segmentHeight * IMG_WIDTH * sizeof(unsigned char));
+
+    double computationStart = MPI_Wtime();
+    for (int y = processID * segmentHeight; y < (processID + 1) * segmentHeight; y++) {
+        for (int x = 0; x < IMG_WIDTH; x++) {
+            double real = (x - IMG_WIDTH / 2.0) * 4.0 / IMG_WIDTH;
+            double imag = (y - IMG_HEIGHT / 2.0) * 4.0 / IMG_HEIGHT;
+            int color = computeMandelbrot(real, imag);
+            segmentBuffer[(y - processID * segmentHeight) * IMG_WIDTH + x] = (unsigned char)(color % 256);
         }
     }
+    double computationEnd = MPI_Wtime();
 
-    save_pgm("mandelbrot.pgm", image);
+    double communicationStart = MPI_Wtime();
+    unsigned char *completeImage = NULL;
+    if (processID == 0) {
+        completeImage = (unsigned char *)malloc(IMG_HEIGHT * IMG_WIDTH * sizeof(unsigned char));
+    }
+
+    MPI_Gather(segmentBuffer, segmentHeight * IMG_WIDTH, MPI_UNSIGNED_CHAR, completeImage, segmentHeight * IMG_WIDTH, MPI_UNSIGNED_CHAR, 0, MPI_COMM_WORLD);
+    double communicationEnd = MPI_Wtime();
+
+    double totalExecutionTime = MPI_Wtime() - startTime;
+    double computationTime = computationEnd - computationStart;
+    double communicationTime = communicationEnd - communicationStart;
+    double commCompRatio = communicationTime / computationTime;
+    double totalCommCompRatio = 0.0;
+
+    MPI_Reduce(&commCompRatio, &totalCommCompRatio, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    if (processID == 0) {
+        totalCommCompRatio /= numProcesses;
+
+        printf("Communication/Computation Ratio: %.2f\n", totalCommCompRatio);
+        printf("Total Execution Time: %lf seconds\n", totalExecutionTime);
+        printf("Number of Processes: %d\n", numProcesses);
+
+        FILE *outputFile = fopen("mandelbrot.ppm", "wb");
+        if (!outputFile) {
+            fprintf(stderr, "Error: Unable to open the file for writing.\n");
+            MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+        }
+
+        fprintf(outputFile, "P6\n%d %d\n255\n", IMG_WIDTH, IMG_HEIGHT);
+        for (int i = 0; i < IMG_HEIGHT; i++) {
+            for (int j = 0; j < IMG_WIDTH; j++) {
+                unsigned char pixelValue = completeImage[i * IMG_WIDTH + j];
+                fputc(pixelValue, outputFile);
+                fputc(pixelValue, outputFile);
+                fputc(pixelValue, outputFile);
+            }
+        }
+        fclose(outputFile);
+        free(completeImage);
+    }
+
+    free(segmentBuffer);
+    MPI_Finalize();
 
     return 0;
 }
+
